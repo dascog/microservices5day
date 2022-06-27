@@ -1,0 +1,333 @@
+gRPC Spring Boot Demo
+=====================
+Full Code https://bitbucket.org/dascog/grpc-demo.git
+
+1. Using IntelliJ create a Spring Boot project with Spring Web dependency
+
+2. In src/main create a proto directory and in that directory create ChatMessages.proto as follows:
+
+syntax = "proto3";
+option java_multiple_files = true;
+
+import "google/protobuf/timestamp.proto";
+package com.example.grpcdemo.proto; // make sure this is whatever the package this file resides in
+message ChatMessage {
+    string from = 1;
+    string message = 2;
+}
+message ChatMessageFromServer {
+    google.protobuf.Timestamp timestamp = 1;
+    ChatMessage message = 2;
+}
+service ChatService {
+    rpc chat(stream ChatMessage) returns (stream ChatMessageFromServer);
+}
+
+3. In the <plugins> section of the <build> in the Maven POM.xml:
+
+
+            <plugin>
+                <groupId>org.xolstice.maven.plugins</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <version>0.6.1</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:3.3.0:exe:${os.detected.classifier}</protocArtifact>
+                    <pluginId>grpc-java</pluginId>
+                    <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.4.0:exe:${os.detected.classifier}</pluginArtifact>
+                    <!--protoSourceRoot>${basedir}/src/main/resources/proto</protoSourceRoot-->
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>compile</goal>
+                            <goal>compile-custom</goal>
+                        </goals>
+                    </execution>
+		</executions>
+	   </plugin>
+
+4. In the <build> section of the pom.xml:
+
+
+        <extensions>
+            <extension>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>1.6.1</version>
+            </extension>
+        </extensions>
+
+5. Add this <dependency>
+
+
+        <dependency>
+            <groupId>net.devh</groupId>
+            <artifactId>grpc-spring-boot-starter</artifactId>
+            <version>2.12.0.RELEASE</version>
+        </dependency>
+
+6. Generate the gRPC classes using ./mvnw clean -X compile
+
+7. Add the generated sources to the build in the <executions> section:
+
+		      <execution>
+                        <id>add-source</id>
+                        <phase>generate-sources</phase>
+                        <configuration>
+                            <sources>
+                                <source>${project.build.directory}/target/generated-sources/protobuf</source>
+                                <source>${project.build.directory}/target/generated-sources/protobuf/grpc-java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+
+8. Create a new package "controllers" under grpcdemo
+
+9. Add a new class ChatServiceImpl and extend the generated class ChatServiceGrpc.ChatServiceImplBase
+
+
+package com.example.grpcdemo.controllers;
+
+import com.example.grpcdemo.proto.ChatServiceGrpc;
+
+public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
+}
+
+10. Override the chat method and keep a list of the Client StreamObservers
+
+public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
+
+    private static LinkedHashSet<StreamObserver<ChatMessageFromServer>> chatClients = new LinkedHashSet<>();
+
+    @Override
+    public StreamObserver<ChatMessage> chat(StreamObserver<ChatMessageFromServer> responseObserver) {
+        chatClients.add(responseObserver);
+
+
+11. return a new StreamObserver from the chat function, and define overrides for StreamObserver methods in the return
+
+   @Override
+    public StreamObserver<ChatMessage> chat(StreamObserver<ChatMessageFromServer> responseObserver) {
+        chatClients.add(responseObserver);
+
+       return new StreamObserver<>() {
+            @Override
+            public void onNext(ChatMessage chatMessage) {
+
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+            }
+
+            @Override
+            public void onCompleted() {
+            }
+        };
+    }
+
+12. Complete the onNext override with a method that iterates through all the client StreamObservers and publishes the chatMessage to each
+
+           @Override
+            public void onNext(ChatMessage chatMessage) {
+                for (StreamObserver<ChatMessageFromServer> chatClient : chatClients) {
+                    chatClient.onNext(ChatMessageFromServer.newBuilder().setMessage(chatMessage).build());
+                }
+
+            }
+
+13. Complete the trivial overrides of the onError and onCompleted methods
+
+            @Override
+            public void onError(Throwable throwable) {
+                responseObserver.onError(throwable);
+            }
+
+            @Override
+            public void onCompleted() {
+                chatClients.remove(responseObserver);
+            }
+
+    The full code for this file is as follows:
+
+package com.example.grpcdemo.controllers;
+
+import java.util.LinkedHashSet;
+
+import com.example.grpcdemo.proto.ChatMessage;
+import com.example.grpcdemo.proto.ChatMessageFromServer;
+import com.example.grpcdemo.proto.ChatServiceGrpc;
+import io.grpc.stub.StreamObserver;
+
+public class ChatServiceImpl extends ChatServiceGrpc.ChatServiceImplBase {
+
+        private static LinkedHashSet<StreamObserver<ChatMessageFromServer>> chatClients = new LinkedHashSet<>();
+
+        @Override
+        public StreamObserver<ChatMessage> chat(StreamObserver<ChatMessageFromServer> responseObserver) {
+            chatClients.add(responseObserver);
+    
+            return new StreamObserver<>() {
+                @Override
+                public void onNext(ChatMessage chatMessage) {
+                    for (StreamObserver<ChatMessageFromServer> chatClient : chatClients) {
+                        chatClient.onNext(ChatMessageFromServer.newBuilder().setMessage(chatMessage).build());
+                    }
+                }
+    
+                @Override
+                public void onError(Throwable throwable) {
+                    responseObserver.onError(throwable);
+                }
+    
+                @Override
+                public void onCompleted() {
+                    chatClients.remove(responseObserver);
+                }
+            };
+        }
+}
+
+
+14. The gRPC server code is now complete. To test it use the Spring Boot testing framework. First create a resources directory under src/test and add a new application.properties file to it.
+
+grpc.server.inProcessName=test
+grpc.server.port=-1
+grpc.client.inProcess.address=in-process:test
+
+15. Open the auto-generated GRpcDemoApplicationTests.java file and in the class definition create two GrpcClients:
+
+    @GrpcClient("inProcess")
+    private ChatServiceGrpc.ChatServiceStub chatClient1;
+
+    @GrpcClient("inProcess")
+    private ChatServiceGrpc.ChatServiceStub chatClient2;
+
+16. Add code to generate the StreamObservers with necessary overrides, and a helper function to generate chat messages from strings:
+
+    private StreamObserver<ChatMessage> generateObserver(List messages)
+    {
+        return new StreamObserver<>() {
+            @Override
+            public void onNext(ChatMessage chatMessage) {
+                messages.add(chatMessage);
+                System.out.println(chatMessage.getMessage());
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+
+            }
+
+            @Override
+            public void onCompleted() {
+
+            }
+        };
+    }
+
+
+    private ChatMessage generateChatMessage(String message, String from)
+    {
+        return ChatMessage.newBuilder()
+                .setMessage(message)
+                .setFrom(from)
+                .build();
+    }
+
+17. Now hook it all up in a test method:
+
+    @Test
+    public void testChat()
+    {
+        List messages = new ArrayList<ChatMessageFromServer>();
+
+        StreamObserver chatClient1Observer = generateObserver(messages);
+        StreamObserver chatClient2Observer = generateObserver(messages);
+
+        chatClient1.chat(chatClient1Observer);
+        chatClient2.chat(chatClient2Observer);
+
+        chatClient1Observer.onNext(generateChatMessage("Hello Chat Client2", "ChatClient1"));
+        chatClient2Observer.onNext(generateChatMessage("Hello Chat Client1", "ChatClient2"));
+
+        Assert.notEmpty(messages, "Validate Messages are populated");
+    }
+
+    The full code of this file should look like this:
+
+
+package com.example.grpcdemo;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.util.Assert;
+
+import com.example.grpcdemo.proto.ChatMessage;
+import com.example.grpcdemo.proto.ChatMessageFromServer;
+import com.example.grpcdemo.proto.ChatServiceGrpc;
+
+import io.grpc.stub.StreamObserver;
+import net.devh.boot.grpc.client.inject.GrpcClient;
+
+@SpringBootTest
+class GrpcDemoApplicationTests {
+
+    @GrpcClient("inProcess")
+    private ChatServiceGrpc.ChatServiceStub chatClient1;
+
+    @GrpcClient("inProcess")
+    private ChatServiceGrpc.ChatServiceStub chatClient2;
+
+	private StreamObserver<ChatMessage> generateObserver(List messages)
+    {
+        return new StreamObserver<>() {
+            @Override
+            public void onNext(ChatMessage chatMessage) {
+                messages.add(chatMessage);
+                System.out.println(chatMessage.getMessage());
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+
+            }
+
+            @Override
+            public void onCompleted() {
+
+            }
+        };
+    }
+	
+    private ChatMessage generateChatMessage(String message, String from)
+    {
+        return ChatMessage.newBuilder()
+                .setMessage(message)
+                .setFrom(from)
+                .build();
+    }
+
+    @Test
+    public void testChat()
+    {
+        List messages = new ArrayList<ChatMessageFromServer>();
+
+        StreamObserver chatClient1Observer = generateObserver(messages);
+        StreamObserver chatClient2Observer = generateObserver(messages);
+
+        chatClient1.chat(chatClient1Observer);
+        chatClient2.chat(chatClient2Observer);
+
+        chatClient1Observer.onNext(generateChatMessage("Hello Chat Client2", "ChatClient1"));
+        chatClient2Observer.onNext(generateChatMessage("Hello Chat Client1", "ChatClient2"));
+
+        Assert.notEmpty(messages, "Validate Messages are populated");
+    }
+}
+
+18. Right click on testChat() and select "Run testChat()"
+
